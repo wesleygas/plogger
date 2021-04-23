@@ -1,0 +1,449 @@
+
+<!DOCTYPE html>
+
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Python documentation</title>
+    <link rel="stylesheet" href="_static/pygments.css" type="text/css" />
+    <link rel="stylesheet" href="_static/alabaster.css" type="text/css" />
+    <script id="documentation_options" data-url_root="./" src="_static/documentation_options.js"></script>
+    <script src="_static/jquery.js"></script>
+    <script src="_static/underscore.js"></script>
+    <script src="_static/doctools.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+   
+  <link rel="stylesheet" href="_static/custom.css" type="text/css" />
+  
+  
+  <meta name="viewport" content="width=device-width, initial-scale=0.9, maximum-scale=0.9" />
+
+  </head><body>
+  
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          
+
+          <div class="body" role="main">
+            
+  <div class="section" id="dc-power-logger">
+<h1>DC Power Logger<a class="headerlink" href="#dc-power-logger" title="Permalink to this headline">None</a></h1>
+<p>There are lots of awesome power logger projects around the internet, but none of them
+have the the flexibility of integrating nicely with everything that ESPHome provides.</p>
+<p>In this project we will build an all-in-one power meter/logger around the common INA219
+current sensor, making a custom component to handle the power to energy integration and, in
+addition to the given Homeassistant connectivity, we will make it capable of logging to a
+sdcard just for good measure.</p>
+<div class="figure align-center">
+<a class="reference internal image-reference" href="_images/plogger-complete.jpg"><img alt="_images/plogger-complete.jpg" src="_images/plogger-complete.jpg" style="width: 75.0%;" /></a>
+</div>
+<div class="section" id="inputs">
+<h2>Inputs<a class="headerlink" href="#inputs" title="Permalink to this headline">None</a></h2>
+<p>As a power metering device, there are only two inputs we are interested in:
+<code class="docutils literal notranslate"><span class="pre">Current</span></code> and <code class="docutils literal notranslate"><span class="pre">Voltage</span></code>. Luckly, the <span class="xref std std-doc">/components/sensor/ina219</span>
+gets the job done in that regard, so the first step is to setup this sensor
+using the existing documentation.</p>
+<p>However, if we wanted to know if that battery really had a 6000mAh capacity or how
+much energy has been used by a device, we would need to know a bit more about how
+much time that device spent drawing that much power.</p>
+</div>
+<div class="section" id="custom-sensor">
+<h2>Custom Sensor<a class="headerlink" href="#custom-sensor" title="Permalink to this headline">None</a></h2>
+<p>Of course we could use the sensor’s <code class="docutils literal notranslate"><span class="pre">update_interval</span></code> and build from that, but to get
+accurate energy readings we need to have frequent power readings, even better if we can
+know exactly how long it took between each one of them. This order of resolution is not
+available through the existing sensor integration, and that is why we need a custom one.
+Below is the code defining this sensor, you have to create a “power_logger.h” inside the
+“esphome” folder that should be on your default config folder.</p>
+<div class="highlight-c++ notranslate"><div class="highlight"><pre><span></span><span class="cp">#include</span> <span class="cpf">&quot;esphome.h&quot;</span><span class="cp"></span>
+<span class="cp">#include</span> <span class="cpf">&quot;SD.h&quot;</span><span class="cp"></span>
+
+<span class="cp">#define LOGFILENAME &quot;plogger.csv&quot;</span>
+
+<span class="k">class</span> <span class="nc">powerLogger</span> <span class="o">:</span> <span class="k">public</span> <span class="n">Component</span><span class="p">,</span> <span class="k">public</span> <span class="n">Sensor</span> <span class="p">{</span>
+<span class="k">public</span><span class="o">:</span>
+    <span class="cm">/**</span>
+<span class="cm">     * The constructor of the powerLogger class receives references for the current</span>
+<span class="cm">     * and voltage sensors created by the INA219 integration and uses their internal</span>
+<span class="cm">     * values to efficiently do the calculations</span>
+<span class="cm">     *</span>
+<span class="cm">     * @param int_dt    Internal deltaT, The minimum timestep for pooling the measurements</span>
+<span class="cm">     * @param inaCurr   Current sensor reference, received through the id(SENSOR_ID)</span>
+<span class="cm">     * @param inaColt   Voltage sensor reference, received through the id(SENSOR_ID)</span>
+<span class="cm">     * @param ina       Actual Component reference, received through the id(COMPONENT_ID)</span>
+<span class="cm">     *</span>
+<span class="cm">     */</span>
+    <span class="n">powerLogger</span><span class="p">(</span><span class="kt">uint16_t</span> <span class="n">int_dt</span><span class="p">,</span> <span class="n">Sensor</span> <span class="o">*</span><span class="n">inaCurr</span><span class="p">,</span> <span class="n">Sensor</span> <span class="o">*</span><span class="n">inaVolt</span><span class="p">,</span> <span class="n">PollingComponent</span> <span class="o">*</span><span class="n">ina</span><span class="p">)</span> <span class="o">:</span>
+        <span class="n">int_dt</span><span class="p">(</span><span class="n">int_dt</span><span class="p">),</span> <span class="n">inaCurrent</span><span class="p">(</span><span class="n">inaCurr</span><span class="p">),</span> <span class="n">inaVoltage</span><span class="p">(</span><span class="n">inaVolt</span><span class="p">),</span> <span class="n">inaComp</span><span class="p">(</span><span class="n">ina</span><span class="p">)</span> <span class="p">{}</span>
+
+    <span class="kt">float</span> <span class="n">get_setup_priority</span><span class="p">()</span> <span class="k">const</span> <span class="k">override</span> <span class="p">{</span> <span class="k">return</span> <span class="n">esphome</span><span class="o">::</span><span class="n">setup_priority</span><span class="o">::</span><span class="n">DATA</span><span class="p">;</span> <span class="p">}</span>
+
+    <span class="n">Sensor</span> <span class="o">*</span><span class="n">capacity</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Sensor</span><span class="p">();</span>
+    <span class="n">Sensor</span> <span class="o">*</span><span class="n">energy</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Sensor</span><span class="p">();</span>
+    <span class="n">Sensor</span> <span class="o">*</span><span class="n">sdLog</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Sensor</span><span class="p">();</span>
+
+    <span class="kt">uint16_t</span> <span class="n">int_dt</span><span class="p">;</span>
+
+    <span class="n">Sensor</span> <span class="o">*</span><span class="n">inaCurrent</span> <span class="o">=</span> <span class="k">nullptr</span><span class="p">;</span>
+    <span class="n">Sensor</span> <span class="o">*</span><span class="n">inaVoltage</span> <span class="o">=</span> <span class="k">nullptr</span><span class="p">;</span>
+    <span class="n">PollingComponent</span> <span class="o">*</span><span class="n">inaComp</span> <span class="o">=</span> <span class="k">nullptr</span><span class="p">;</span>
+
+    <span class="k">const</span> <span class="kt">int</span> <span class="n">chipSelect</span> <span class="o">=</span> <span class="n">D8</span><span class="p">;</span>  <span class="c1">// used for ESP8266</span>
+    <span class="kt">bool</span> <span class="n">sdCardPresent</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+
+    <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">last_measurement</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="kt">float</span> <span class="n">net_mah</span> <span class="o">=</span> <span class="mf">0.0f</span><span class="p">;</span>
+    <span class="kt">float</span> <span class="n">net_wh</span> <span class="o">=</span> <span class="mf">0.0f</span><span class="p">;</span>
+
+    <span class="kt">float</span> <span class="n">last_c</span> <span class="o">=</span> <span class="mf">0.0f</span><span class="p">;</span>
+    <span class="kt">float</span> <span class="n">last_v</span> <span class="o">=</span> <span class="mf">0.0f</span><span class="p">;</span>
+
+    <span class="kt">void</span> <span class="nf">setup</span><span class="p">()</span> <span class="k">override</span> <span class="p">{</span>
+        <span class="n">ESP_LOGD</span><span class="p">(</span><span class="s">&quot;custom&quot;</span><span class="p">,</span> <span class="s">&quot;Sending hello from plogger&quot;</span><span class="p">);</span>
+        <span class="n">inaComp</span><span class="o">-&gt;</span><span class="n">update</span><span class="p">();</span>
+        <span class="n">last_c</span> <span class="o">=</span> <span class="n">getCurr</span><span class="p">();</span>
+        <span class="n">last_v</span> <span class="o">=</span> <span class="n">getVolt</span><span class="p">();</span>
+
+        <span class="k">if</span><span class="p">(</span><span class="o">!</span><span class="n">SD</span><span class="p">.</span><span class="n">begin</span><span class="p">(</span><span class="n">chipSelect</span><span class="p">)){</span>
+            <span class="n">sdCardPresent</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+            <span class="n">ESP_LOGE</span><span class="p">(</span><span class="s">&quot;custom&quot;</span><span class="p">,</span><span class="s">&quot;SDCARD Initialization failed!&quot;</span><span class="p">);</span>
+        <span class="p">}</span> <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">SD</span><span class="p">.</span><span class="n">exists</span><span class="p">(</span><span class="n">LOGFILENAME</span><span class="p">)){</span>
+            <span class="n">File</span> <span class="n">dataFile</span> <span class="o">=</span> <span class="n">SD</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">LOGFILENAME</span><span class="p">,</span> <span class="n">FILE_WRITE</span><span class="p">);</span>
+            <span class="k">if</span><span class="p">(</span><span class="n">dataFile</span><span class="p">){</span>
+                <span class="c1">//Create the CSV header</span>
+                <span class="n">dataFile</span><span class="p">.</span><span class="n">println</span><span class="p">(</span><span class="s">&quot;Voltage,Current,Power,mAh,mWh,Dt&quot;</span><span class="p">);</span>
+                <span class="n">dataFile</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+
+        <span class="c1">// Publish the SDCard presence so we can show it on the display</span>
+        <span class="n">sdLog</span><span class="o">-&gt;</span><span class="n">publish_state</span><span class="p">((</span><span class="kt">int</span><span class="p">)</span><span class="n">sdCardPresent</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="kt">void</span> <span class="nf">loop</span><span class="p">()</span> <span class="k">override</span> <span class="p">{</span>
+        <span class="k">if</span><span class="p">(</span><span class="n">millis</span><span class="p">()</span> <span class="o">&gt;</span> <span class="n">last_measurement</span> <span class="o">+</span> <span class="n">int_dt</span><span class="p">){</span>
+            <span class="n">inaComp</span><span class="o">-&gt;</span><span class="n">update</span><span class="p">();</span>
+            <span class="kt">unsigned</span> <span class="kt">long</span> <span class="n">dt</span> <span class="o">=</span> <span class="n">millis</span><span class="p">()</span> <span class="o">-</span> <span class="n">last_measurement</span><span class="p">;</span>
+            <span class="n">last_measurement</span> <span class="o">+=</span> <span class="n">dt</span><span class="p">;</span>
+            <span class="kt">float</span> <span class="n">new_c</span> <span class="o">=</span> <span class="n">getCurr</span><span class="p">();</span>
+            <span class="kt">float</span> <span class="n">new_v</span> <span class="o">=</span> <span class="n">getVolt</span><span class="p">();</span>
+
+            <span class="c1">//Integrate through the midpoint method</span>
+            <span class="kt">float</span> <span class="n">dmah</span> <span class="o">=</span> <span class="p">(((</span><span class="n">new_c</span> <span class="o">-</span> <span class="n">last_c</span><span class="p">)</span><span class="o">/</span><span class="mf">2.0f</span><span class="p">)</span><span class="o">+</span><span class="n">last_c</span><span class="p">);</span>
+            <span class="k">if</span><span class="p">(</span><span class="n">dmah</span> <span class="o">!=</span> <span class="mf">0.0f</span><span class="p">){</span> <span class="c1">//Spare the calculations if value is zero</span>
+                <span class="n">dmah</span> <span class="o">*=</span> <span class="p">((</span><span class="kt">float</span><span class="p">)</span><span class="n">dt</span><span class="o">/</span><span class="mf">3600.0f</span><span class="p">);</span> <span class="c1">//convert our current uAs to mAh</span>
+                <span class="kt">float</span> <span class="n">dwh</span> <span class="o">=</span> <span class="p">(((</span><span class="n">new_v</span> <span class="o">-</span> <span class="n">last_v</span><span class="p">)</span><span class="o">/</span><span class="mf">2.0f</span><span class="p">)</span><span class="o">+</span><span class="n">last_v</span><span class="p">)</span><span class="o">*</span><span class="n">dmah</span><span class="p">;</span>
+
+                <span class="n">net_mah</span> <span class="o">+=</span> <span class="n">dmah</span><span class="p">;</span>
+                <span class="n">net_wh</span> <span class="o">+=</span> <span class="n">dwh</span><span class="p">;</span>
+            <span class="p">}</span>
+
+            <span class="n">ESP_LOGVV</span><span class="p">(</span><span class="s">&quot;custom&quot;</span><span class="p">,</span> <span class="s">&quot;mAh: %.5f || mWh: %.5f || Dt: %lu&quot;</span><span class="p">,</span> <span class="n">net_mah</span><span class="p">,</span> <span class="n">net_wh</span><span class="p">,</span> <span class="n">dt</span><span class="p">);</span>
+            <span class="n">capacity</span><span class="o">-&gt;</span><span class="n">publish_state</span><span class="p">(</span><span class="n">net_mah</span><span class="p">);</span>
+            <span class="n">energy</span><span class="o">-&gt;</span><span class="n">publish_state</span><span class="p">(</span><span class="n">net_wh</span><span class="p">);</span>
+
+            <span class="n">last_c</span> <span class="o">=</span> <span class="n">new_c</span><span class="p">;</span>
+            <span class="n">last_v</span> <span class="o">=</span> <span class="n">new_v</span><span class="p">;</span>
+
+            <span class="k">if</span><span class="p">(</span><span class="n">sdCardPresent</span><span class="p">){</span>
+                <span class="n">File</span> <span class="n">dataFile</span> <span class="o">=</span> <span class="n">SD</span><span class="p">.</span><span class="n">open</span><span class="p">(</span><span class="n">LOGFILENAME</span><span class="p">,</span> <span class="n">FILE_WRITE</span><span class="p">);</span>
+                <span class="k">if</span><span class="p">(</span><span class="n">dataFile</span><span class="p">){</span>
+                    <span class="c1">// Write a new csv line to the sdcard</span>
+                    <span class="c1">//             Voltage(V),Current(A),Power(W),mAh,mWh,Dt</span>
+                    <span class="n">dataFile</span><span class="p">.</span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;%.3f,%.5f,%.4f,%.3f,%.3f,%lu</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="n">new_v</span><span class="p">,</span> <span class="n">new_c</span><span class="p">,</span> <span class="n">new_v</span><span class="o">*</span><span class="n">new_c</span><span class="p">,</span> <span class="n">net_mah</span><span class="p">,</span> <span class="n">net_wh</span><span class="p">,</span> <span class="n">dt</span><span class="p">);</span>
+                    <span class="n">dataFile</span><span class="p">.</span><span class="n">close</span><span class="p">();</span>
+                <span class="p">}</span><span class="k">else</span><span class="p">{</span>
+                    <span class="c1">//if the file opening failed, disable sdcard altogether</span>
+                    <span class="n">sdCardPresent</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+                    <span class="n">sdLog</span><span class="o">-&gt;</span><span class="n">publish_state</span><span class="p">((</span><span class="kt">int</span><span class="p">)</span><span class="n">sdCardPresent</span><span class="p">);</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+
+    <span class="c1">//Helper functions to get the raw sensor data and do some filtering beforehand</span>
+    <span class="kt">float</span> <span class="nf">getCurr</span><span class="p">(){</span>
+        <span class="kt">float</span> <span class="n">value</span> <span class="o">=</span> <span class="n">inaCurrent</span><span class="o">-&gt;</span><span class="n">raw_state</span><span class="p">;</span>
+        <span class="k">if</span><span class="p">(</span><span class="n">fabs</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mf">0.0002</span><span class="p">)</span> <span class="n">value</span> <span class="o">=</span> <span class="mf">0.0</span><span class="p">;</span>
+        <span class="k">return</span> <span class="n">value</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="kt">float</span> <span class="nf">getVolt</span><span class="p">(){</span>
+        <span class="kt">float</span> <span class="n">value</span> <span class="o">=</span> <span class="n">inaVoltage</span><span class="o">-&gt;</span><span class="n">raw_state</span><span class="p">;</span>
+        <span class="k">return</span> <span class="n">value</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="c1">// In case we would need to reset the values without reseting the whole node</span>
+    <span class="kt">void</span> <span class="nf">resetCapacity</span><span class="p">(){</span>
+        <span class="n">net_mah</span> <span class="o">=</span> <span class="mf">0.0f</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="kt">void</span> <span class="nf">resetEnergy</span><span class="p">(){</span>
+        <span class="n">net_wh</span> <span class="o">=</span> <span class="mf">0.0f</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">};</span>
+</pre></div>
+</div>
+<p>The details of building a custom sensors are present at the <span class="xref std std-doc">/components/sensor/custom</span>
+documentation.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This is not the best implementation on how to write to a SDCard, so if you are planning
+on making really long logs (days, weeks) it would be better to write to an internal buffer
+first to reduce the frequency of writes and avoid premature failure of the flash memory.</p>
+</div>
+</div>
+<div class="section" id="configuration-file">
+<h2>Configuration file<a class="headerlink" href="#configuration-file" title="Permalink to this headline">None</a></h2>
+<p>All this fast juggling of information between sensors makes for config file that
+is a bit tricky at first glance, but the comments are there to take care of some
+‘gotchas’.</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="c1"># The IMPORTANT comments on the component IDs that are used and that cannot be omitted</span>
+
+<span class="nt">esphome</span><span class="p">:</span>
+<span class="nt">name</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">power_logger</span>
+<span class="nt">platform</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">ESP8266</span>
+<span class="nt">board</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">d1_mini</span>
+<span class="nt">includes</span><span class="p">:</span>
+  <span class="p p-Indicator">-</span> <span class="l l-Scalar l-Scalar-Plain">power_logger.h</span> <span class="c1">#Import the file from the esphome folder</span>
+
+<span class="nt">wifi</span><span class="p">:</span>
+<span class="nt">ssid</span><span class="p">:</span> <span class="kt">!secret</span> <span class="l l-Scalar l-Scalar-Plain">wifi_ssid</span>
+<span class="nt">password</span><span class="p">:</span> <span class="kt">!secret</span> <span class="l l-Scalar l-Scalar-Plain">wifi_pwd</span>
+<span class="nt">fast_connect</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">True</span>
+<span class="nt">id</span><span class="p">:</span> <span class="s">&#39;wifi_obj&#39;</span> <span class="c1">#IMPORTANT</span>
+
+<span class="nt">api</span><span class="p">:</span>
+<span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">ha_api</span> <span class="c1">#IMPORTANT:</span>
+<span class="nt">password</span><span class="p">:</span> <span class="kt">!secret</span> <span class="l l-Scalar l-Scalar-Plain">esphome_haapi_pwd</span>
+
+<span class="nt">ota</span><span class="p">:</span>
+<span class="nt">password</span><span class="p">:</span> <span class="kt">!secret</span> <span class="l l-Scalar l-Scalar-Plain">esphome_ota_pwd</span>
+
+<span class="nt">i2c</span><span class="p">:</span>
+<span class="nt">frequency</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">800kHz</span>
+
+<span class="c1"># Fonts downloaded from https://www.fontsquirrel.com/fonts/list/popular</span>
+<span class="nt">font</span><span class="p">:</span>
+<span class="p p-Indicator">-</span> <span class="nt">file</span><span class="p">:</span> <span class="s">&quot;./fonts/roboto/Roboto-Regular.ttf&quot;</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">rbt_r</span>
+  <span class="nt">size</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">12</span>
+<span class="p p-Indicator">-</span> <span class="nt">file</span><span class="p">:</span> <span class="s">&quot;./fonts/roboto/Roboto-Bold.ttf&quot;</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">rbt_rm</span>
+  <span class="nt">size</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">10</span>
+
+<span class="c1"># The ina219 sensors are filtered with a throttle to avoid flooding Homeassistant with</span>
+<span class="c1"># readings that would come at every integration step</span>
+<span class="nt">sensor</span><span class="p">:</span>
+<span class="p p-Indicator">-</span> <span class="nt">platform</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">ina219</span>
+  <span class="nt">address</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">0x40</span>
+  <span class="nt">shunt_resistance</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">0.1 ohm</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;ina_s&quot;</span> <span class="c1">#IMPORTANT</span>
+  <span class="nt">current</span><span class="p">:</span>
+    <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;plg_cr&quot;</span> <span class="c1">#IMPORTANT</span>
+    <span class="nt">name</span><span class="p">:</span> <span class="s">&quot;Plogger</span><span class="nv"> </span><span class="s">Current&quot;</span>
+    <span class="nt">accuracy_decimals</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">5</span>
+    <span class="nt">filters</span><span class="p">:</span>
+      <span class="p p-Indicator">-</span> <span class="nt">offset</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">0.00010</span>
+      <span class="p p-Indicator">-</span> <span class="nt">throttle</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">800ms</span>
+  <span class="nt">power</span><span class="p">:</span>
+    <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;plg_pw&quot;</span>
+    <span class="nt">name</span><span class="p">:</span> <span class="s">&quot;Plogger</span><span class="nv"> </span><span class="s">Power&quot;</span>
+    <span class="nt">accuracy_decimals</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">5</span>
+    <span class="nt">filters</span><span class="p">:</span>
+      <span class="p p-Indicator">-</span> <span class="nt">throttle</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">800ms</span>
+  <span class="nt">bus_voltage</span><span class="p">:</span>
+    <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;plg_v&quot;</span> <span class="c1">#IMPORTANT</span>
+    <span class="nt">name</span><span class="p">:</span> <span class="s">&quot;Plogger</span><span class="nv"> </span><span class="s">Bus</span><span class="nv"> </span><span class="s">Voltage&quot;</span>
+    <span class="nt">accuracy_decimals</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">5</span>
+    <span class="nt">filters</span><span class="p">:</span>
+      <span class="p p-Indicator">-</span> <span class="nt">throttle</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">800ms</span>
+  <span class="nt">max_voltage</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">32.0V</span>
+  <span class="nt">max_current</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">3.2A</span>
+
+<span class="p p-Indicator">-</span> <span class="nt">platform</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">custom</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">customsens</span>
+  <span class="nt">lambda</span><span class="p">:</span> <span class="p p-Indicator">|-</span>
+    <span class="no">// Here is where we create the custom component object, filling all the parameters</span>
+    <span class="no">// with the respective values, sensors and components.</span>
+    <span class="no">auto my_sensor = new powerLogger(100,id(plg_cr),id(plg_v),id(ina_s));</span>
+    <span class="no">App.register_component(my_sensor);</span>
+    <span class="no">return {my_sensor-&gt;capacity,my_sensor-&gt;energy,my_sensor-&gt;sdLog};</span>
+  <span class="nt">sensors</span><span class="p">:</span>
+    <span class="p p-Indicator">-</span> <span class="nt">name</span><span class="p">:</span> <span class="s">&quot;Plogger</span><span class="nv"> </span><span class="s">Net</span><span class="nv"> </span><span class="s">Charge&quot;</span>
+      <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;plg_mah&quot;</span>
+      <span class="nt">unit_of_measurement</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">mAh</span>
+      <span class="nt">accuracy_decimals</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">5</span>
+      <span class="nt">filters</span><span class="p">:</span>
+      <span class="p p-Indicator">-</span> <span class="nt">throttle</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">800ms</span>
+    <span class="p p-Indicator">-</span> <span class="nt">name</span><span class="p">:</span> <span class="s">&quot;Plogger</span><span class="nv"> </span><span class="s">Net</span><span class="nv"> </span><span class="s">Energy&quot;</span>
+      <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;plg_mwh&quot;</span>
+      <span class="nt">unit_of_measurement</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">mWh</span>
+      <span class="nt">accuracy_decimals</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">5</span>
+      <span class="nt">filters</span><span class="p">:</span>
+      <span class="p p-Indicator">-</span> <span class="nt">throttle</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">800ms</span>
+    <span class="p p-Indicator">-</span> <span class="nt">id</span><span class="p">:</span> <span class="s">&quot;sdLog&quot;</span>
+
+<span class="nt">image</span><span class="p">:</span>
+<span class="p p-Indicator">-</span> <span class="nt">file</span><span class="p">:</span> <span class="s">&quot;wifi_icon.png&quot;</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">wifi_icon</span>
+  <span class="nt">resize</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">16x16</span>
+
+<span class="p p-Indicator">-</span> <span class="nt">file</span><span class="p">:</span> <span class="s">&quot;home-assistant.png&quot;</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">ha_icon</span>
+  <span class="nt">resize</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">16x16</span>
+
+<span class="p p-Indicator">-</span> <span class="nt">file</span><span class="p">:</span> <span class="s">&quot;sd.png&quot;</span>
+  <span class="nt">id</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">sd_icon</span>
+  <span class="nt">resize</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">16x16</span>
+
+<span class="c1">#Lets finish it all with a nice OLED display</span>
+<span class="nt">display</span><span class="p">:</span>
+<span class="p p-Indicator">-</span> <span class="nt">platform</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">ssd1306_i2c</span>
+  <span class="nt">model</span><span class="p">:</span> <span class="s">&quot;SSD1306</span><span class="nv"> </span><span class="s">128x64&quot;</span>
+  <span class="nt">reset_pin</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">D0</span>
+  <span class="nt">address</span><span class="p">:</span> <span class="l l-Scalar l-Scalar-Plain">0x3C</span>
+  <span class="nt">lambda</span><span class="p">:</span> <span class="p p-Indicator">|-</span>
+    <span class="no">it.print(0, 0, id(rbt_r), &quot;Plogger!&quot;);</span>
+    <span class="no">//Display readings</span>
+    <span class="no">it.printf(0, 20, id(rbt_rm), &quot;%.3fV&quot;, id(plg_v).state);</span>
+    <span class="no">it.printf(0, 30, id(rbt_rm), &quot;%.1fmA&quot;, id(plg_cr).state*1000.0);</span>
+    <span class="no">it.printf(60, 30, id(rbt_rm), &quot;%.2fmAh&quot;, id(plg_mah).raw_state);</span>
+    <span class="no">it.printf(0, 40, id(rbt_rm), &quot;%.4fW&quot;, id(plg_pw).state);</span>
+    <span class="no">it.printf(60, 40, id(rbt_rm), &quot;%.2fmWh&quot;, id(plg_mwh).raw_state);</span>
+
+    <span class="no">// Display all icons of available services</span>
+    <span class="no">if(id(wifi_obj).is_connected()){</span>
+      <span class="no">it.image(60, 0, id(wifi_icon), COLOR_ON, COLOR_OFF);</span>
+    <span class="no">}else{</span>
+      <span class="no">it.filled_rectangle(60, 0, 16, 16, COLOR_OFF);</span>
+    <span class="no">}</span>
+    <span class="no">if(id(ha_api).is_connected()){</span>
+      <span class="no">it.image(80, 0, id(ha_icon), COLOR_OFF, COLOR_ON);</span>
+    <span class="no">}else{</span>
+      <span class="no">it.filled_rectangle(80, 0, 16, 16, COLOR_OFF);</span>
+    <span class="no">}</span>
+    <span class="no">if(id(sdLog).state){</span>
+      <span class="no">it.image(100, 0, id(sd_icon), COLOR_ON, COLOR_OFF);</span>
+    <span class="no">}else{</span>
+      <span class="no">it.filled_rectangle(100, 0, 16, 16, COLOR_OFF);</span>
+    <span class="no">}</span>
+
+    <span class="no"># Enable logging</span>
+    <span class="no">logger:</span>
+    <span class="no">level: DEBUG</span>
+    <span class="no">esp8266_store_log_strings_in_flash: False</span>
+</pre></div>
+</div>
+<p>I got the icons from the <a class="reference external" href="https://materialdesignicons.com/">Material Design Icons</a> website.
+To make them work in ESPHome I also had to make the transparent background not transparent.
+The easyest way to do this is to open the .png you get from the website on Paint and save
+from there. I also put them all along with the  <code class="docutils literal notranslate"><span class="pre">config</span></code> and <code class="docutils literal notranslate"><span class="pre">.h</span></code> files on my github over
+<a class="reference external" href="https://github.com/wesleygas/home-assistant-config/tree/main/esphome">here</a></p>
+</div>
+<div class="section" id="the-hardware">
+<h2>The hardware<a class="headerlink" href="#the-hardware" title="Permalink to this headline">None</a></h2>
+<p>All the hardware for this project is available through modules available anywhere.
+Here is the basic ones I used:</p>
+<ul class="simple">
+<li><p>WEMOS D1 Mini</p></li>
+<li><p>SSD1306 0.96” OLED display</p></li>
+<li><p>SDCard reader modules</p></li>
+<li><p>INA219 Current sensor module</p></li>
+</ul>
+<p>You can get all the functionality with only those modules on a breadboard, but I wanted a more
+permanent and flexible solution, so I also got female USB-A and USB-MicroB connectors for measuring
+usb devices as well as an AMS1117 linear voltage regulator to be able to power the board from
+the same input as the device I am monitoring. In the end the final connections looks something like
+this:</p>
+<div class="figure align-center">
+<a class="reference internal image-reference" href="_images/plogger-electrical-diagram.jpg"><img alt="_images/plogger-electrical-diagram.jpg" src="_images/plogger-electrical-diagram.jpg" style="width: 75.0%;" /></a>
+</div>
+<p>If you want, you could easily make a custom PCB to connect them all, but you can always solder them
+all in a perfboard and do the connections yourself. Just don’t be scared if it all ends up looking
+like this:</p>
+<div class="figure align-center">
+<a class="reference internal image-reference" href="_images/plogger-soldering.jpg"><img alt="_images/plogger-soldering.jpg" src="_images/plogger-soldering.jpg" style="width: 75.0%;" /></a>
+</div>
+</div>
+<div class="section" id="results-and-data">
+<h2>Results and data<a class="headerlink" href="#results-and-data" title="Permalink to this headline">None</a></h2>
+<p>Now it is just a matter of setting up you new device on Homeassistant as you do with any other
+esphome device. As an example, here is a dashboard from InfluxDB made with the log of the output from a solar
+panel.</p>
+<div class="figure align-center">
+<a class="reference internal image-reference" href="_images/plogger-solar-power.jpg"><img alt="_images/plogger-solar-power.jpg" src="_images/plogger-solar-power.jpg" style="width: 75.0%;" /></a>
+</div>
+<p>And here is an example of the logfile stored on the SDCard with all the measurements plus
+a Dt, which is the time difference from the last data point so you can build a nice graph
+even if the logger is not connected to the internet or to the Homeassistant API</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="n">Voltage</span><span class="p">,</span><span class="n">Current</span><span class="p">,</span><span class="n">Power</span><span class="p">,</span><span class="n">mAh</span><span class="p">,</span><span class="n">mWh</span><span class="p">,</span><span class="n">Dt</span>
+<span class="mf">12.340</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08448</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0424</span><span class="p">,</span><span class="o">-</span><span class="mf">0.009</span><span class="p">,</span><span class="o">-</span><span class="mf">0.111</span><span class="p">,</span><span class="mi">379</span>
+<span class="mf">12.344</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08555</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0561</span><span class="p">,</span><span class="o">-</span><span class="mf">0.011</span><span class="p">,</span><span class="o">-</span><span class="mf">0.142</span><span class="p">,</span><span class="mi">105</span>
+<span class="mf">12.340</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08555</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0557</span><span class="p">,</span><span class="o">-</span><span class="mf">0.014</span><span class="p">,</span><span class="o">-</span><span class="mf">0.172</span><span class="p">,</span><span class="mi">104</span>
+<span class="mf">12.336</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08791</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0844</span><span class="p">,</span><span class="o">-</span><span class="mf">0.016</span><span class="p">,</span><span class="o">-</span><span class="mf">0.203</span><span class="p">,</span><span class="mi">104</span>
+<span class="mf">12.336</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08947</span><span class="p">,</span><span class="o">-</span><span class="mf">1.1038</span><span class="p">,</span><span class="o">-</span><span class="mf">0.019</span><span class="p">,</span><span class="o">-</span><span class="mf">0.235</span><span class="p">,</span><span class="mi">104</span>
+<span class="mf">12.336</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08928</span><span class="p">,</span><span class="o">-</span><span class="mf">1.1013</span><span class="p">,</span><span class="o">-</span><span class="mf">0.022</span><span class="p">,</span><span class="o">-</span><span class="mf">0.267</span><span class="p">,</span><span class="mi">106</span>
+<span class="mf">12.340</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08683</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0715</span><span class="p">,</span><span class="o">-</span><span class="mf">0.024</span><span class="p">,</span><span class="o">-</span><span class="mf">0.300</span><span class="p">,</span><span class="mi">111</span>
+<span class="mf">12.340</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08683</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0715</span><span class="p">,</span><span class="o">-</span><span class="mf">0.027</span><span class="p">,</span><span class="o">-</span><span class="mf">0.331</span><span class="p">,</span><span class="mi">104</span>
+<span class="mf">12.328</span><span class="p">,</span><span class="o">-</span><span class="mf">0.08791</span><span class="p">,</span><span class="o">-</span><span class="mf">1.0837</span><span class="p">,</span><span class="o">-</span><span class="mf">0.029</span><span class="p">,</span><span class="o">-</span><span class="mf">0.363</span><span class="p">,</span><span class="mi">105</span>
+</pre></div>
+</div>
+</div>
+</div>
+
+
+          </div>
+          
+        </div>
+      </div>
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<h1 class="logo"><a href="#">Python</a></h1>
+
+
+
+
+
+
+
+
+<h3>Navigation</h3>
+
+<div class="relations">
+<h3>Related Topics</h3>
+<ul>
+  <li><a href="#">Documentation overview</a><ul>
+  </ul></li>
+</ul>
+</div>
+
+
+
+
+
+
+
+
+        </div>
+      </div>
+      <div class="clearer"></div>
+    </div>
+    <div class="footer">
+      &copy;.
+      
+      |
+      Powered by <a href="http://sphinx-doc.org/">Sphinx 3.5.4</a>
+      &amp; <a href="https://github.com/bitprophet/alabaster">Alabaster 0.7.12</a>
+      
+    </div>
+
+    
+
+    
+  </body>
+</html>
